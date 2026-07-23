@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transcript AI (local, Whisper-powered)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Transcript AI</h1>
+    <p class="subtitle">Upload a video/audio file or record a meeting — get a timestamped transcript, running locally with Whisper.</p>
+  </header>
+
+  <main>
+    <section class="panel" id="input-panel">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="upload">Upload file</button>
+        <button class="tab-btn" data-tab="record">Record meeting</button>
+      </div>
+
+      <div class="tab-content active" id="tab-upload">
+        <label class="dropzone" id="dropzone" for="fileInput">
+          <span id="dropzoneLabel">Drag &amp; drop a video or audio file here, or click to browse</span>
+          <input type="file" id="fileInput" accept="audio/*,video/*" hidden />
+        </label>
+      </div>
+
+      <div class="tab-content" id="tab-record">
+        <div class="record-controls">
+          <button id="recordBtn" class="btn primary">Start recording</button>
+          <span id="recordTimer">00:00</span>
+        </div>
+        <audio id="recordedPreview" controls hidden></audio>
+      </div>
+
+      <div class="options">
+        <label for="language">Language</label>
+        <select id="language">
+          <option value="auto" selected>Auto-detect</option>
+          <option value="en">English</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="vi">Vietnamese</option>
+          <option value="zh">Chinese</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+        </select>
+        <button id="transcribeBtn" class="btn primary" disabled>Transcribe</button>
+      </div>
+
+      <div id="status" class="status" hidden></div>
+    </section>
+
+    <section class="panel" id="result-panel" hidden>
+      <div class="result-header">
+        <h2>Transcript</h2>
+        <div class="download-links" id="downloadLinks"></div>
+      </div>
+      <div id="segments" class="segments"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
