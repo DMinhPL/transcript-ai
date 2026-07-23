@@ -4,3 +4,7 @@ models/
 uploads/
 transcripts/
 *.log
+AGENTS.md
+CLAUDE.md
+.claude/
+.gitnexus/
