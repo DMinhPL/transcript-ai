@@ -4,10 +4,20 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const extractZip = require("extract-zip");
+const tar = require("tar");
+const bz2 = require("unbzip2-stream");
 
 const ROOT = path.join(__dirname, "..");
 const BIN_DIR = path.join(ROOT, "bin", "whisper");
 const MODELS_DIR = path.join(ROOT, "models");
+const DIARIZATION_DIR = path.join(MODELS_DIR, "diarization");
+const SEGMENTATION_MODEL_DIR = path.join(DIARIZATION_DIR, "sherpa-onnx-pyannote-segmentation-3-0");
+const EMBEDDING_MODEL_PATH = path.join(DIARIZATION_DIR, "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx");
+
+const SEGMENTATION_MODEL_URL =
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
+const EMBEDDING_MODEL_URL =
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx";
 
 const WHISPER_VERSION = "v1.9.1";
 const WHISPER_ZIP_URL = `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_VERSION}/whisper-bin-x64.zip`;
@@ -105,9 +115,43 @@ async function setupModel() {
   console.log("Model ready.");
 }
 
+async function setupDiarizationModels() {
+  const segModelPath = path.join(SEGMENTATION_MODEL_DIR, "model.onnx");
+  if (!fs.existsSync(segModelPath)) {
+    fs.mkdirSync(DIARIZATION_DIR, { recursive: true });
+    console.log("Downloading speaker segmentation model...");
+    const tmpBz2 = path.join(os.tmpdir(), `seg-${Date.now()}.tar.bz2`);
+    await download(SEGMENTATION_MODEL_URL, tmpBz2);
+    console.log("Extracting segmentation model...");
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(tmpBz2)
+        .pipe(bz2())
+        .pipe(tar.extract({ cwd: DIARIZATION_DIR }))
+        .on("finish", resolve)
+        .on("error", reject);
+    });
+    fs.rmSync(tmpBz2, { force: true });
+    console.log("Segmentation model ready.");
+  } else {
+    console.log("Speaker segmentation model already present, skipping.");
+  }
+
+  if (!fs.existsSync(EMBEDDING_MODEL_PATH)) {
+    fs.mkdirSync(DIARIZATION_DIR, { recursive: true });
+    console.log("Downloading speaker embedding model...");
+    const tmpPath = EMBEDDING_MODEL_PATH + ".part";
+    await download(EMBEDDING_MODEL_URL, tmpPath);
+    fs.renameSync(tmpPath, EMBEDDING_MODEL_PATH);
+    console.log("Embedding model ready.");
+  } else {
+    console.log("Speaker embedding model already present, skipping.");
+  }
+}
+
 async function main() {
   await setupWhisperBinary();
   await setupModel();
+  await setupDiarizationModels();
   console.log("\nSetup complete. Run `npm start` to launch the app.");
 }
 

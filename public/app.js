@@ -7,6 +7,8 @@ const recordBtn = document.getElementById('recordBtn');
 const recordTimer = document.getElementById('recordTimer');
 const recordedPreview = document.getElementById('recordedPreview');
 const languageSelect = document.getElementById('language');
+const diarizeCheckbox = document.getElementById('diarize');
+const numSpeakersInput = document.getElementById('numSpeakers');
 const transcribeBtn = document.getElementById('transcribeBtn');
 const statusEl = document.getElementById('status');
 const resultPanel = document.getElementById('result-panel');
@@ -19,6 +21,19 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let recordTimerInterval = null;
 let recordSeconds = 0;
+
+fetch('/api/health')
+  .then((res) => res.json())
+  .then((health) => {
+    console.log('Server health:', health);
+    if (!health.diarizationAvailable) {
+      diarizeCheckbox.checked = false;
+      diarizeCheckbox.disabled = true;
+      diarizeCheckbox.parentElement.title =
+        'Speaker diarization models not installed. Run `WHISPER_MODEL=small npm run setup` on the server.';
+    }
+  })
+  .catch(() => {});
 
 tabButtons.forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -101,6 +116,10 @@ function updateTranscribeButton() {
   transcribeBtn.disabled = !selectedFile;
 }
 
+diarizeCheckbox.addEventListener('change', () => {
+  numSpeakersInput.disabled = !diarizeCheckbox.checked;
+});
+
 function showStatus(message, isError = false) {
   statusEl.hidden = false;
   statusEl.textContent = message;
@@ -126,6 +145,10 @@ transcribeBtn.addEventListener('click', async () => {
   const formData = new FormData();
   formData.append('media', selectedFile);
   formData.append('language', languageSelect.value);
+  formData.append('diarize', diarizeCheckbox.checked ? 'true' : 'false');
+  if (diarizeCheckbox.checked && numSpeakersInput.value) {
+    formData.append('numSpeakers', numSpeakersInput.value);
+  }
 
   try {
     const res = await fetch('/api/transcribe', {
@@ -151,8 +174,14 @@ function renderResult(data) {
     row.className = 'segment';
     row.innerHTML = `
       <span class="timestamp">${formatTime(seg.start)}</span>
+      ${data.diarized ? '<span class="speaker"></span>' : ''}
       <span class="text"></span>
     `;
+    if (data.diarized) {
+      row.querySelector('.speaker').textContent = seg.speaker
+        ? `Speaker ${seg.speaker}`
+        : '';
+    }
     row.querySelector('.text').textContent = seg.text;
     segmentsEl.appendChild(row);
   }

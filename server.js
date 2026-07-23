@@ -7,26 +7,129 @@ const { spawn } = require("child_process");
 const express = require("express");
 const multer = require("multer");
 const ffmpegPath = require("ffmpeg-static");
+const sherpa_onnx = require("sherpa-onnx-node");
 
 const ROOT = __dirname;
 const UPLOAD_DIR = path.join(ROOT, "uploads");
 const TRANSCRIPT_DIR = path.join(ROOT, "transcripts");
 const WHISPER_EXE = path.join(ROOT, "bin", "whisper", "whisper-cli.exe");
 const MODELS_DIR = path.join(ROOT, "models");
+const DIARIZATION_DIR = path.join(MODELS_DIR, "diarization");
+const SEGMENTATION_MODEL_PATH = path.join(DIARIZATION_DIR, "sherpa-onnx-pyannote-segmentation-3-0", "model.onnx");
+const EMBEDDING_MODEL_PATH = path.join(DIARIZATION_DIR, "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx");
 
 for (const dir of [UPLOAD_DIR, TRANSCRIPT_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-function defaultModelPath() {
+// ".en" models (base.en, small.en, ...) are English-only — they cannot
+// transcribe or auto-detect any other language, so they must never be
+// selected unless the request is explicitly for English.
+function pickModelPath(language) {
   if (!fs.existsSync(MODELS_DIR)) return null;
-  const preferred = ["ggml-base.en.bin", "ggml-small.en.bin", "ggml-small.bin", "ggml-base.bin"];
-  for (const name of preferred) {
-    const p = path.join(MODELS_DIR, name);
-    if (fs.existsSync(p)) return p;
+  const available = fs.readdirSync(MODELS_DIR).filter((f) => f.endsWith(".bin"));
+  if (!available.length) return null;
+
+  const isEnglishOnly = (name) => name.includes(".en.bin");
+  const preferredEnglish = ["ggml-base.en.bin", "ggml-small.en.bin", "ggml-medium.en.bin", "ggml-tiny.en.bin"];
+  const preferredMultilingual = ["ggml-small.bin", "ggml-medium.bin", "ggml-base.bin", "ggml-large-v3.bin", "ggml-tiny.bin"];
+
+  const findFirst = (names) => names.find((n) => available.includes(n));
+
+  if (language === "en") {
+    const match = findFirst(preferredEnglish) || findFirst(preferredMultilingual);
+    if (match) return path.join(MODELS_DIR, match);
+  } else {
+    const match = findFirst(preferredMultilingual);
+    if (match) return path.join(MODELS_DIR, match);
+    // No multilingual model installed — fall back to whatever exists so the
+    // request doesn't hard-fail, even though English-only models will
+    // mistranscribe non-English audio.
   }
-  const any = fs.readdirSync(MODELS_DIR).find((f) => f.endsWith(".bin"));
-  return any ? path.join(MODELS_DIR, any) : null;
+
+  const anyMultilingual = available.find((f) => !isEnglishOnly(f));
+  if (anyMultilingual) return path.join(MODELS_DIR, anyMultilingual);
+  return path.join(MODELS_DIR, available[0]);
+}
+
+function diarizationAvailable() {
+  return fs.existsSync(SEGMENTATION_MODEL_PATH) && fs.existsSync(EMBEDDING_MODEL_PATH);
+}
+
+let diarizer = null;
+function getDiarizer() {
+  if (!diarizer) {
+    diarizer = new sherpa_onnx.OfflineSpeakerDiarization({
+      segmentation: { pyannote: { model: SEGMENTATION_MODEL_PATH } },
+      embedding: { model: EMBEDDING_MODEL_PATH },
+      clustering: { numClusters: -1, threshold: 0.5 },
+      minDurationOn: 0.2,
+      minDurationOff: 0.5,
+    });
+  }
+  return diarizer;
+}
+
+// Returns [{start, end, speaker}] in seconds, speaker is a 0-based integer id.
+function diarizeAudio(wavPath, numSpeakers) {
+  const sd = getDiarizer();
+  sd.setConfig({ clustering: { numClusters: numSpeakers > 0 ? numSpeakers : -1, threshold: 0.5 } });
+  const wave = sherpa_onnx.readWave(wavPath);
+  return sd.process(wave.samples);
+}
+
+// Assigns each whisper segment the speaker with the largest time overlap.
+function assignSpeakers(segments, diarizationSegments) {
+  if (!diarizationSegments?.length) return segments;
+  return segments.map((seg) => {
+    let bestSpeaker = null;
+    let bestOverlap = 0;
+    for (const d of diarizationSegments) {
+      const overlap = Math.min(seg.end, d.end) - Math.max(seg.start, d.start);
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        bestSpeaker = d.speaker;
+      }
+    }
+    return bestSpeaker === null ? seg : { ...seg, speaker: bestSpeaker + 1 };
+  });
+}
+
+function speakerLabel(seg) {
+  return seg.speaker ? `[Speaker ${seg.speaker}] ` : "";
+}
+
+function toSrtTimestamp(seconds) {
+  const ms = Math.round(seconds * 1000);
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const msRem = ms % 1000;
+  const pad = (n, len = 2) => String(n).padStart(len, "0");
+  return `${pad(h)}:${pad(m)}:${pad(s)},${pad(msRem, 3)}`;
+}
+
+function buildTxt(segments) {
+  return segments.map((seg) => `${speakerLabel(seg)}${seg.text}`).join("\n");
+}
+
+function buildSrt(segments) {
+  return segments
+    .map(
+      (seg, i) =>
+        `${i + 1}\n${toSrtTimestamp(seg.start)} --> ${toSrtTimestamp(seg.end)}\n${speakerLabel(seg)}${seg.text}\n`
+    )
+    .join("\n");
+}
+
+function buildVtt(segments) {
+  const body = segments
+    .map(
+      (seg, i) =>
+        `${i + 1}\n${toSrtTimestamp(seg.start).replace(",", ".")} --> ${toSrtTimestamp(seg.end).replace(",", ".")}\n${speakerLabel(seg)}${seg.text}\n`
+    )
+    .join("\n");
+  return `WEBVTT\n\n${body}`;
 }
 
 const upload = multer({
@@ -78,16 +181,24 @@ app.post("/api/transcribe", upload.single("media"), async (req, res) => {
   const uploadedPath = req.file?.path;
   const originalName = req.file?.originalname || "recording";
   const language = (req.body.language || "auto").trim();
+  const diarize = req.body.diarize === "true" || req.body.diarize === "1";
+  const numSpeakers = parseInt(req.body.numSpeakers, 10) || 0;
 
   if (!uploadedPath) {
     return res.status(400).json({ error: "No file uploaded." });
   }
 
-  const modelPath = defaultModelPath();
+  const modelPath = pickModelPath(language);
   if (!modelPath) {
     return res.status(500).json({
       error: "No Whisper model found. Run `npm run setup` first to download one.",
     });
+  }
+  if (language !== "en" && modelPath.includes(".en.bin")) {
+    console.warn(
+      `Warning: no multilingual model installed — falling back to an English-only model for language "${language}". ` +
+        `Run \`WHISPER_MODEL=small npm run setup\` to install one.`
+    );
   }
   if (!fs.existsSync(WHISPER_EXE)) {
     return res.status(500).json({
@@ -100,13 +211,19 @@ app.post("/api/transcribe", upload.single("media"), async (req, res) => {
   const wavPath = path.join(jobDir, "audio.wav");
   const outBase = path.join(jobDir, "transcript");
 
+  if (diarize && !diarizationAvailable()) {
+    return res.status(500).json({
+      error: "Speaker diarization models not found. Run `npm run setup` first to download them.",
+    });
+  }
+
   try {
     await convertToWav(uploadedPath, wavPath);
     await transcribe(wavPath, outBase, { language, modelPath });
 
     const jsonRaw = fs.readFileSync(outBase + ".json", "utf-8");
     const parsed = JSON.parse(jsonRaw);
-    const segments = (parsed.transcription || []).map((seg) => ({
+    let segments = (parsed.transcription || []).map((seg) => ({
       start: seg.offsets.from / 1000,
       end: seg.offsets.to / 1000,
       startLabel: seg.timestamps.from.replace(",", "."),
@@ -114,10 +231,20 @@ app.post("/api/transcribe", upload.single("media"), async (req, res) => {
       text: seg.text.trim(),
     }));
 
+    if (diarize) {
+      const diarizationSegments = diarizeAudio(wavPath, numSpeakers);
+      segments = assignSpeakers(segments, diarizationSegments);
+    }
+
+    fs.writeFileSync(outBase + ".txt", buildTxt(segments));
+    fs.writeFileSync(outBase + ".srt", buildSrt(segments));
+    fs.writeFileSync(outBase + ".vtt", buildVtt(segments));
+
     res.json({
       jobId,
       originalName,
       language: parsed.result?.language || language,
+      diarized: diarize,
       segments,
       fullText: segments.map((s) => s.text).join(" "),
       downloads: {
@@ -148,9 +275,11 @@ app.get("/api/download/:jobId/:format", (req, res) => {
 });
 
 app.get("/api/health", (req, res) => {
+  const modelsDirExists = fs.existsSync(MODELS_DIR);
   res.json({
     whisperBinary: fs.existsSync(WHISPER_EXE),
-    model: defaultModelPath(),
+    models: modelsDirExists ? fs.readdirSync(MODELS_DIR).filter((f) => f.endsWith(".bin")) : [],
+    diarizationAvailable: diarizationAvailable(),
   });
 });
 

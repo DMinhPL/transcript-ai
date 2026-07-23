@@ -47,6 +47,13 @@
           <option value="ja">Japanese</option>
           <option value="ko">Korean</option>
         </select>
+
+        <label for="diarize" class="checkbox-label">
+          <input type="checkbox" id="diarize" />
+          Identify speakers
+        </label>
+        <input type="number" id="numSpeakers" min="1" max="20" placeholder="# speakers (auto)" aria-label="Number of speakers" disabled />
+
         <button id="transcribeBtn" class="btn primary" disabled>Transcribe</button>
       </div>
 
